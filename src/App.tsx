@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowDownLeft, ArrowRight, ArrowUpRight, BarChart3, Check, CheckCheck, ChevronLeft, ChevronRight, CircleHelp, Clipboard, Clock3, Copy, Download, ExternalLink, Fingerprint, Globe2, LayoutDashboard, Loader2, Trophy, Search, ShieldCheck, Sparkles, Wallet, X } from "lucide-react";
 import { appendPage, MAX_OFFSET, notional, requestWalletData, SAMPLE_WALLET, summarize } from "../lib/txflow";
 import type { Fill, Ledger, Network, Page, Period, Report, VolumeRanking } from "../lib/txflow";
+import { recordPageView, recordSearch } from "./usage";
 
 const money=(value:number,decimals=2)=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:decimals}).format(value);
 const metricMoney=(value:number)=>Math.abs(value)>=1e6?new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',notation:'compact',maximumFractionDigits:2}).format(value):money(value);
@@ -94,7 +95,7 @@ export default function Home(){
   const fillsCount=report?.fills.total??stats.rows.length;
 
   useEffect(()=>{if(guide){guideRef.current?.showModal()}else{guideRef.current?.close()}},[guide]);
-  useEffect(()=>{const params=new URLSearchParams(window.location.search);const a=params.get('address');if(a&&/^0x[a-fA-F0-9]{40}$/.test(a)){const n=params.get('network')==='testnet'?'testnet':'mainnet';const p=['7D','30D','90D'].includes(params.get('period')??'')?params.get('period') as Period:'ALLTIME';setAddress(a);setNetwork(n);setPeriod(p);void run(a,n,p);}return()=>controller.current?.abort();},[]); // initial deep link only
+  useEffect(()=>{recordPageView();const params=new URLSearchParams(window.location.search);const a=params.get('address');if(a&&/^0x[a-fA-F0-9]{40}$/.test(a)){const n=params.get('network')==='testnet'?'testnet':'mainnet';const p=['7D','30D','90D'].includes(params.get('period')??'')?params.get('period') as Period:'ALLTIME';setAddress(a);setNetwork(n);setPeriod(p);void run(a,n,p,'deep_link');}return()=>controller.current?.abort();},[]); // initial deep link only
 
   async function scanMore(base:Report,signal:AbortSignal,kind:'fills'|'ledger'='fills'){
     let current=base;
@@ -115,22 +116,24 @@ export default function Home(){
     finally{if(!signal.aborted)setScanning(false)}
   }
 
-  async function run(a=address,n=network,p=period){
+  async function run(a=address,n=network,p=period,source:'manual'|'sample'|'deep_link'='manual'){
     const cleaned=a.trim();
     if(!/^0x[a-fA-F0-9]{40}$/.test(cleaned)){setError('Enter a valid wallet address: 0x followed by 40 hexadecimal characters.');return;}
     controller.current?.abort();const c=new AbortController();controller.current=c;
     setLoading(true);setScanning(false);setReport(null);setError('');setScanError('');setPage(0);setFilter('all');
+    recordSearch('search_start',n,source);
     try{
       const r=await requestData<Report>({address:cleaned,network:n,period:p},c.signal);
       if(c.signal.aborted)return;
+      recordSearch('search_success',n,source);
       setReport(r);setLoading(false);
       const url=new URL(window.location.href);url.search=new URLSearchParams({address:cleaned.toLowerCase(),network:n,period:p}).toString();window.history.replaceState({},'',url);
       await scanMore(r,c.signal);
-    }catch(e){if(!c.signal.aborted){setError(e instanceof Error?e.message:'Could not retrieve wallet data.');setLoading(false)}}
+    }catch(e){if(!c.signal.aborted){recordSearch('search_error',n,source);setError(e instanceof Error?e.message:'Could not retrieve wallet data.');setLoading(false)}}
   }
 
   function changePeriod(p:Period){setPeriod(p);setPage(0);if(report)void run(report.address,report.network,p)}
-  function sample(){setAddress(SAMPLE_WALLET);setNetwork('testnet');void run(SAMPLE_WALLET,'testnet',period)}
+  function sample(){setAddress(SAMPLE_WALLET);setNetwork('testnet');void run(SAMPLE_WALLET,'testnet',period,'sample')}
   async function copy(value:string,key:string){try{await navigator.clipboard.writeText(value);setCopied(key);setTimeout(()=>setCopied(''),2000)}catch{setError('Copy failed. Please copy the address manually.')}}
   async function paste(){try{setAddress((await navigator.clipboard.readText()).trim());setError('')}catch{document.getElementById('wallet-address')?.focus();setError('Paste the address with Ctrl+V or your device menu.')}}
   function exportCsv(){if(!report)return;const cell=(v:unknown)=>'"'+String(v??'').replace(/^[=+@\t\r]/,"'$&").replaceAll('"','""')+'"';const header=tab==='fills'?['time_UTC','market','side','price','size','notional_USDC','fee','fee_token','closed_pnl_USDC','transaction_hash','order_id','fill_id']:['time_UTC','type','amount','chain','status','hash'];const data=tab==='fills'?rows.map(f=>[new Date(f.time).toISOString(),f.symbol??f.coin,f.side,f.px,f.sz,notional(f),f.fee,f.feeToken,f.closedPnl,f.hash,f.oid,f.tid]):(report.ledger?.data??[]).map(l=>[new Date(l.time).toISOString(),l.delta.type,l.delta.amount,l.delta.chain,l.delta.status,l.hash]);const csv='\uFEFF'+[header,...data].map(r=>r.map(cell).join(',')).join('\r\n');const link=document.createElement('a');link.href=URL.createObjectURL(new Blob([csv],{type:'text/csv;charset=utf-8;'}));link.download=`flowlens-${report.network}-${report.address}-${tab}-${report.period}${(tab==='fills'?report.fills.hasMore:report.ledger?.hasMore)?'-partial':''}.csv`;link.click();URL.revokeObjectURL(link.href)}

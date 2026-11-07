@@ -10,7 +10,9 @@
     "directory": "./dist/client",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*"]
+    "run_worker_first": ["/api/*", "/admin", "/admin/*"]
   },
+  "durable_objects": { "bindings": [{ "name": "USAGE_ANALYTICS", "class_name": "UsageAnalytics" }] },
+  "migrations": [{ "tag": "flowlens-usage-v1", "new_sqlite_classes": ["UsageAnalytics"] }],
   "observability": { "enabled": false }
 }
