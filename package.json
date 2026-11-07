@@ -1,0 +1,22 @@
+{
+  "name": "flowlens-txflow",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=22.13.0" },
+  "scripts": {
+    "build": "vite build && esbuild server/worker.ts --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=dist/worker.mjs",
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test:live": "node --experimental-strip-types scripts/check-live.mjs",
+    "dev": "npm run build && wrangler dev --local --config wrangler.prebuilt.jsonc",
+    "deploy": "wrangler deploy --config wrangler.jsonc",
+    "deploy:prebuilt": "wrangler deploy --config wrangler.prebuilt.jsonc",
+    "deploy:check": "wrangler deploy --dry-run --config wrangler.prebuilt.jsonc"
+  },
+  "dependencies": { "react": "19.2.6", "react-dom": "19.2.6", "lucide-react": "1.31.0" },
+  "devDependencies": {
+    "@types/node": "22.19.19", "@types/react": "19.2.14", "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2", "esbuild": "0.28.0", "typescript": "5.9.3", "vite": "8.0.13", "wrangler": "4.92.0"
+  }
+}
