@@ -65,6 +65,45 @@ export function windowStart(period: Period, end: number) {
   return period === "ALLTIME" ? undefined : end - Number(period.slice(0,-1)) * 86400000;
 }
 
+async function denialReference(response:Response):Promise<string> {
+  const details:string[]=[];
+  const reference=response.headers.get('cf-ray')??response.headers.get('x-request-id');
+  if(reference&&/^[a-z0-9:_.-]{1,128}$/i.test(reference))details.push(`Reference: ${reference}`);
+  if(response.headers.get('cf-mitigated')==='challenge')details.push('Gateway challenge required');
+
+  // Inspect a bounded prefix for a provider error code. Never return the raw
+  // upstream page, request headers, cookies, IP addresses, or HTML to visitors.
+  let prefix='';
+  const reader=response.body?.getReader();
+  if(reader){
+    const decoder=new TextDecoder();
+    let remaining=16384;
+    try{
+      while(remaining>0){
+        const {done,value}=await reader.read();
+        if(done)break;
+        const part=value.subarray(0,remaining);
+        prefix+=decoder.decode(part,{stream:true});
+        remaining-=part.byteLength;
+      }
+      prefix+=decoder.decode();
+    }catch{
+      // A readable response body is optional; keep any available request ID.
+    }finally{
+      try{await reader.cancel();}catch{}
+    }
+  }
+  let code:unknown;
+  try{
+    const json=JSON.parse(prefix);
+    if(json&&typeof json==='object')code=json.code??json.errorCode??json.error?.code;
+  }catch{}
+  if(code===undefined)code=prefix.match(/cf-error-code["'][^>]*>\s*(\d{3,6})/i)?.[1]
+    ??prefix.match(/\berror\s+code\s*:\s*(\d{3,6})\b/i)?.[1];
+  if((typeof code==='string'||typeof code==='number')&&/^[a-z0-9_-]{1,48}$/i.test(String(code)))details.push(`Upstream code: ${code}`);
+  return details.length?' '+details.join('; ')+'.':'';
+}
+
 export async function rpcRead(network: Network, body: Record<string, unknown>, fetcher: typeof fetch = fetch, signal?:AbortSignal): Promise<Record<string, unknown>> {
   const host = network === "mainnet" ? "https://rpc.txflow.com" : "https://rpc.txflow-testnet.xyz";
   signal?.throwIfAborted();
@@ -82,7 +121,11 @@ export async function rpcRead(network: Network, body: Record<string, unknown>, f
   }
   if (!response.ok) {
     if (response.status === 429) throw new ApiError("TXFLOW rate limit reached. Please try again shortly.", 429);
-    if (response.status === 403) throw new ApiError("TXFLOW denied access from this connection (HTTP 403). No wallet data was returned.", 403);
+    if (response.status === 403) {
+      const reference=await denialReference(response);
+      signal?.throwIfAborted();
+      throw new ApiError("TXFLOW denied access from this connection (HTTP 403). No wallet data was returned."+reference,403);
+    }
     throw new ApiError(`The official TXFLOW API returned HTTP ${response.status}. Data is temporarily unavailable.`);
   }
   let json: Record<string,unknown>;
