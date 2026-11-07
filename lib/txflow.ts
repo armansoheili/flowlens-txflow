@@ -39,16 +39,19 @@ export function parseRanking(cohort:Record<string,unknown>, filtered:Record<stri
   return {status:'ranked',rank:row.rank!,total:all.total!,topPercent:row.rank!/all.total!*100,volume:row.volume,asOf:all.lastUpdated!,period};
 }
 
-export async function getVolumeRanking(network:Network,address:string,period:Period,fetcher:typeof fetch=fetch):Promise<VolumeRanking> {
+export async function getVolumeRanking(network:Network,address:string,period:Period,fetcher:typeof fetch=fetch,signal?:AbortSignal):Promise<VolumeRanking> {
   // These public, read-only parameters are the ones used by TXFLOW's official leaderboard.
   if(period==='90D')return emptyRanking('unsupported');
   const p=period.toLowerCase();
   const base={type:'growthGeneralPublic',interface:'/uapi/v1/leaderboard/getOverview',period:p,sortBy:'volume',sortDirection:'desc',offset:0,limit:1};
   for(let attempt=0;attempt<2;attempt++){
     try{
-      const [all,own]=await Promise.all([rpcRead(network,{...base,queryAddress:''},fetcher),rpcRead(network,{...base,queryAddress:address},fetcher)]);
+      const [all,own]=await Promise.all([rpcRead(network,{...base,queryAddress:''},fetcher,signal),rpcRead(network,{...base,queryAddress:address},fetcher,signal)]);
       return parseRanking(all,own,address,p);
-    }catch{if(attempt===1)return emptyRanking('unavailable',p);}
+    }catch(error){
+      signal?.throwIfAborted();
+      if(attempt===1||(error instanceof ApiError&&[403,429].includes(error.status)))return emptyRanking('unavailable',p);
+    }
   }
   return emptyRanking('unavailable',p);
 }
@@ -62,18 +65,24 @@ export function windowStart(period: Period, end: number) {
   return period === "ALLTIME" ? undefined : end - Number(period.slice(0,-1)) * 86400000;
 }
 
-export async function rpcRead(network: Network, body: Record<string, unknown>, fetcher: typeof fetch = fetch): Promise<Record<string, unknown>> {
+export async function rpcRead(network: Network, body: Record<string, unknown>, fetcher: typeof fetch = fetch, signal?:AbortSignal): Promise<Record<string, unknown>> {
   const host = network === "mainnet" ? "https://rpc.txflow.com" : "https://rpc.txflow-testnet.xyz";
+  signal?.throwIfAborted();
   let response: Response;
   try {
     response = await fetcher(host + "/info", {
       method: "POST",
-      headers: {"Content-Type":"application/json", "x-api-version":API_VERSION, "User-Agent":"FlowLens/1.0"},
-      body: JSON.stringify(body), signal: AbortSignal.timeout(18000),
+      headers: {"Content-Type":"application/json", "x-api-version":API_VERSION},
+      credentials: "omit",
+      body: JSON.stringify(body), signal: signal?AbortSignal.any([signal,AbortSignal.timeout(18000)]):AbortSignal.timeout(18000),
     });
-  } catch { throw new ApiError("Could not connect to the official TXFLOW API. Please try again shortly."); }
+  } catch {
+    signal?.throwIfAborted();
+    throw new ApiError("Could not connect to the official TXFLOW API. Please try again shortly.");
+  }
   if (!response.ok) {
     if (response.status === 429) throw new ApiError("TXFLOW rate limit reached. Please try again shortly.", 429);
+    if (response.status === 403) throw new ApiError("TXFLOW denied access from this connection (HTTP 403). No wallet data was returned.", 403);
     throw new ApiError(`The official TXFLOW API returned HTTP ${response.status}. Data is temporarily unavailable.`);
   }
   let json: Record<string,unknown>;
@@ -93,7 +102,7 @@ export function parsePage<T>(json: Record<string,unknown>): Page<T> {
   return {data: page.data, hasMore: page.hasMore, ...(typeof page.total === "number" ? {total:page.total} : {})};
 }
 
-export async function historyPage<T>(network: Network, address: string, period: Period, end: number, kind: "fills"|"ledger", offset=0): Promise<Page<T>> {
+export async function historyPage<T>(network: Network, address: string, period: Period, end: number, kind: "fills"|"ledger", offset=0, fetcher:typeof fetch=fetch, signal?:AbortSignal): Promise<Page<T>> {
   const start = windowStart(period,end);
   const body = {
     type: kind === "fills" ? "userFills" : "userNonFundingLedgerUpdates",
@@ -101,15 +110,15 @@ export async function historyPage<T>(network: Network, address: string, period: 
     ...(start === undefined ? {} : {startTimeMs:start}),
     ...(kind === "fills" ? {accountType:["perp"]} : {deltaTypes:["deposit","withdraw"]}),
   };
-  return parsePage<T>(await rpcRead(network,body));
+  return parsePage<T>(await rpcRead(network,body,fetcher,signal));
 }
 
-export async function getReport(network: Network, address: string, period: Period, end: number): Promise<Report> {
+export async function getReport(network: Network, address: string, period: Period, end: number, fetcher:typeof fetch=fetch, signal?:AbortSignal): Promise<Report> {
   const [fills,overview,ledger,ranking] = await Promise.allSettled([
-    historyPage<Fill>(network,address,period,end,"fills"),
-    rpcRead(network,{type:"userOverview", user_address:address, period}),
-    historyPage<Ledger>(network,address,period,end,"ledger"),
-    getVolumeRanking(network,address,period),
+    historyPage<Fill>(network,address,period,end,"fills",0,fetcher,signal),
+    rpcRead(network,{type:"userOverview", user_address:address, period},fetcher,signal),
+    historyPage<Ledger>(network,address,period,end,"ledger",0,fetcher,signal),
+    getVolumeRanking(network,address,period,fetcher,signal),
   ]);
   if(fills.status === "rejected") throw fills.reason;
   const warnings: string[] = [];
@@ -121,6 +130,24 @@ export async function getReport(network: Network, address: string, period: Perio
   } else warnings.push("Account summary could not be loaded. Trading volume is calculated from retrieved fills.");
   if(ledger.status === "rejected") warnings.push("Deposit and withdrawal history is temporarily unavailable.");
   return {address,network,period,end,overview:summary,fills:fills.value,ledger:ledger.status==="fulfilled"?ledger.value:null,warnings,fetchedAt:Date.now(),ranking:ranking.status==='fulfilled'?ranking.value:emptyRanking('unavailable')};
+}
+
+// Public reads go from the visitor's browser to TXFLOW's CORS-enabled API.
+// Do not send them through the hosting Worker or retry through another host.
+export async function requestWalletData<T>(params:Record<string,string>,signal:AbortSignal,fetcher:typeof fetch=fetch):Promise<T> {
+  signal.throwIfAborted();
+  const address=params.address?.trim().toLowerCase()??'';
+  const network=params.network??'mainnet';
+  const period=params.period??'ALLTIME';
+  const kind=params.kind??'report';
+  const offset=Number(params.offset??0);
+  const end=Number(params.end??Date.now());
+  if(!/^0x[a-f0-9]{40}$/.test(address)||!['mainnet','testnet'].includes(network)||!(PERIODS as readonly string[]).includes(period)||!['report','fills','ledger'].includes(kind)||!Number.isInteger(offset)||offset<0||offset>MAX_OFFSET||!Number.isSafeInteger(end)||end<1577836800000||end>Date.now()+60000)throw new ApiError('Invalid request parameters.',400);
+  const result=kind==='report'
+    ?await getReport(network as Network,address,period as Period,end,fetcher,signal)
+    :await historyPage(network as Network,address,period as Period,end,kind as 'fills'|'ledger',offset,fetcher,signal);
+  signal.throwIfAborted();
+  return result as T;
 }
 
 // Decimal arithmetic avoids accumulating binary floating-point errors in money totals.

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Activity, ArrowDownLeft, ArrowRight, ArrowUpRight, BarChart3, Check, CheckCheck, ChevronLeft, ChevronRight, CircleHelp, Clipboard, Clock3, Copy, Download, ExternalLink, Fingerprint, Globe2, LayoutDashboard, Loader2, Trophy, Search, ShieldCheck, Sparkles, Wallet, X } from "lucide-react";
-import { appendPage, MAX_OFFSET, notional, SAMPLE_WALLET, summarize } from "../lib/txflow";
+import { appendPage, MAX_OFFSET, notional, requestWalletData, SAMPLE_WALLET, summarize } from "../lib/txflow";
 import type { Fill, Ledger, Network, Page, Period, Report, VolumeRanking } from "../lib/txflow";
 
 const money=(value:number,decimals=2)=>new Intl.NumberFormat('en-US',{style:'currency',currency:'USD',maximumFractionDigits:decimals}).format(value);
@@ -65,11 +65,7 @@ function ActivityMap({fills,end}:{fills:Fill[];end:number}){
 }
 
 async function requestData<T>(params:Record<string,string>,signal:AbortSignal):Promise<T>{
-  const response=await fetch('/api/wallet?'+new URLSearchParams(params),{signal});
-  let json:Record<string,unknown>;
-  try{json=await response.json() as Record<string,unknown>}catch{throw new Error('The server returned an unreadable response. Please try again.')}
-  if(!response.ok)throw new Error(typeof json.error==='string'?json.error:'Could not retrieve wallet data.');
-  return json as T;
+  return requestWalletData<T>(params,signal);
 }
 
 export default function Home(){
